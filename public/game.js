@@ -1,80 +1,139 @@
-import { Card, COLORS, RANKS } from '/gameLogic/Card.js';
+import { Card, COLORS, RANKS } from './gameLogic/Card.js';
 
-const socket = io();
-let gameState;
+let socket = null;
+let gameState = null;
 let selectedCard = null;
-let selectedCardRect = null;   // rectangle for visual highlight
-let selectedCardGlow = null;   // persistent glow rectangle
-
-let citadelMove = false;        // Flag to indicate Citadel move mode
-let citadelFromFlag = null;     // Which flag the card is coming from
-
+let selectedCardRect = null;
+let selectedCardGlow = null;
+let citadelMove = false;
+let citadelFromFlag = null;
 let gameOverText = null;
+let roomId = null;
 
-socket.emit("joinGame");
+// store tweens for blinking flags so we can clean them up
+const flagBlinkTweens = new Map();
 
-socket.on("startGame", (state) => {
-  gameState = state;
-  initPhaserGame();
-});
+// --- Start Game ---
+export function startGame(multiplayer = true, existingState = null, existingRoom = null) {
+  const startScreen = document.getElementById("start-screen");
+  if (startScreen) startScreen.style.display = "none";
 
-
-socket.on("updateGame", (state) => {
-  gameState = state;
-
-  // ✅ Skip redraw if game is over (overlay stays visible)
-  if (window.scene && !gameState.gameOver) {
-    redraw(window.scene);
+  if (existingState) {
+    gameState = existingState;
+    roomId = existingRoom;
   }
 
-  // ✅ Deselect if selected card no longer in hand
-  if (selectedCard) {
-    const hand = gameState.hands[socket.id] || [];
-    const stillInHand = hand.some(
-      c => c.rank === selectedCard.rank && c.color === selectedCard.color
-    );
+  initPhaser();
 
-    if (!stillInHand && selectedCardGlow) {
-      selectedCardGlow.setVisible(false);
-      selectedCard = null;
-      selectedCardRect = null;
-    }
-  }
-
-  // ✅ Citadel move prompt (only once when it activates)
-  if (gameState.citadelActive === socket.id && !citadelMove) {
-    console.log("Citadel active! Select a card to move.");
-  }
-});
-
-
-
-function getCardColor(color) {
-  switch (color) {
-    case "Red": return 0xff4d4d;
-    case "Blue": return 0x4d4dff;
-    case "Green": return 0x4dff4d;
-    case "Yellow": return 0xffff4d;
-    case "Purple": return 0xb84dff;
-    case "Orange": return 0xffa500;
-    case "Pink": return 0xffc0cb;
-    default: return 0xffffff;
+  if (multiplayer && socket) {
+    socket.on("updateGame", handleUpdateGame);
+    socket.on("gameOver", handleGameOver);
+    socket.on("opponentDisconnected", ({ playerId }) => {
+      alert(`Opponent ${playerId} disconnected!`);
+    });
+    socket.on("cardDestroyed", handleDestroyedCard);
+  } else {
+    initAI();
   }
 }
 
-function initPhaserGame() {
+export function setSocket(socketInstance) {
+  socket = socketInstance;
+}
+
+// --- AI Placeholder ---
+function initAI() {
+  console.log("AI mode not used in 1v1 online.");
+}
+
+// --- Handle Server Updates ---
+function handleUpdateGame(state) {
+  gameState = state;
+  if (window.scene) redraw(window.scene);
+
+  // Clear selected card if it no longer exists anywhere
+  if (selectedCard) {
+    const existsInHand = gameState.hands?.[socket.id]?.some(
+      c => c.rank === selectedCard.rank && c.color === selectedCard.color && c.owner === selectedCard.owner
+    );
+    const existsOnFlag = gameState.board.some(flag =>
+      Object.values(flag.cards).some(cards =>
+        cards.some(c => c.rank === selectedCard.rank && c.color === selectedCard.color && c.owner === selectedCard.owner)
+      )
+    );
+    const existsInCannon = Object.values(gameState.cannon || {}).some(cannon =>
+      cannon.some(c => c.rank === selectedCard.rank && c.color === selectedCard.color && c.owner === selectedCard.owner)
+    );
+
+    if (!existsInHand && !existsOnFlag && !existsInCannon) {
+      selectedCard = null;
+      selectedCardRect = null;
+      if (selectedCardGlow) selectedCardGlow.setVisible(false);
+    }
+  }
+
+  // --- Citadel activation ---
+  if (gameState.citadelActive === socket.id && !citadelMove) {
+    citadelMove = true;
+    console.log("Citadel active! Select one of your cards from any flag to move to your hand.");
+  }
+}
+
+// --- Handle destroyed card from server ---
+function handleDestroyedCard(card) {
+  if (!gameState) return;
+
+  // Remove card from board
+  gameState.board.forEach(flag => {
+    Object.keys(flag.cards).forEach(pid => {
+      flag.cards[pid] = flag.cards[pid].filter(
+        c => !(c.rank === card.rank && c.color === card.color && c.owner === card.owner)
+      );
+    });
+  });
+
+  // Remove card from cannon
+  Object.keys(gameState.cannon || {}).forEach(pid => {
+    gameState.cannon[pid] = (gameState.cannon[pid] || []).filter(
+      c => !(c.rank === card.rank && c.color === card.color && c.owner === card.owner)
+    );
+  });
+
+  // Clear selection if destroyed
+  if (selectedCard && selectedCard.rank === card.rank && selectedCard.color === card.color && selectedCard.owner === card.owner) {
+    selectedCard = null;
+    selectedCardRect = null;
+    if (selectedCardGlow) selectedCardGlow.setVisible(false);
+  }
+
+  if (window.scene) redraw(window.scene);
+}
+
+// --- Phaser Initialization ---
+export function initPhaser() {
+  const parent = document.getElementById("game-canvas-container");
+  if (!parent) {
+    console.error("No container with id 'game-canvas-container' found!");
+    return;
+  }
+  parent.innerHTML = "";
+
+  window.scene = null;
+  window.socket = socket;
+
   const config = {
     type: Phaser.AUTO,
     width: 1200,
     height: 1000,
+    parent: 'game-canvas-container',
     backgroundColor: "#222",
     scene: { preload, create }
   };
+
   new Phaser.Game(config);
 }
 
 function preload() {}
-
 function create() {
   window.scene = this;
 
@@ -90,48 +149,36 @@ function create() {
   redraw(this);
 }
 
+// --- Redraw Scene ---
 function redraw(scene) {
-  const selectedInfo = selectedCard ? { rank: selectedCard.rank, color: selectedCard.color } : null;
+  if (!gameState) return;
 
-  // Clear previous objects except glow
-  scene.children.list
-    .filter(obj => obj !== selectedCardGlow && obj !== gameOverText)
-    .forEach(obj => obj.destroy());
-
-  drawBoard(scene);
-  drawCannon(scene);
-  drawHand(scene);
-  drawDeck(scene);
-  drawScores(scene);
-
-  // Restore glow for selected card
-  if (selectedInfo) {
-    const hand = gameState.hands[socket.id] || [];
-    const card = hand.find(c => c.rank === selectedInfo.rank && c.color === selectedInfo.color);
-    if (card) {
-      selectedCard = card;
-      const cardRect = scene.children.getChildren().find(obj => obj.getData && obj.getData('card') === card);
-      if (cardRect) {
-        selectedCardRect = cardRect;
-        selectedCardGlow.setPosition(cardRect.x, cardRect.y).setVisible(true);
-      }
-    }
-  }
-}
-
-function drawBoard(scene) {
-  if (!gameState || !gameState.board) return;
-  const cardWidth = 40, cardHeight = 60, padding = 5;
+  const cardWidth = 40,
+        cardHeight = 60,
+        padding = 5;
   const flagPadding = 40;
-  const totalFlags = gameState.board.length;
   const spacingX = 120;
   const centerX = scene.cameras.main.centerX;
   const centerY = scene.cameras.main.centerY;
+  const totalFlags = gameState.board.length;
   const middleIndex = Math.floor(totalFlags / 2);
   const startX = centerX - middleIndex * spacingX;
 
-  const cannonReady = isCannonReady(socket.id);
+  // Clear previous flag rects & tweens
+  gameState.board.forEach((flag, idx) => {
+    if (flag.rect) {
+      if (flagBlinkTweens.has(flag.rect)) {
+        const t = flagBlinkTweens.get(flag.rect);
+        try { t.stop(); } catch {}
+        flagBlinkTweens.delete(flag.rect);
+      }
+      try { flag.rect.destroy(); } catch {}
+    }
+    if (flag.cardRects) flag.cardRects.forEach(c => { try { c.destroy(); } catch {} });
+    flag.cardRects = [];
+  });
 
+  // Draw flags
   gameState.board.forEach((flag, idx) => {
     const x = startX + idx * spacingX;
     const y = centerY;
@@ -139,126 +186,172 @@ function drawBoard(scene) {
     const rect = scene.add.rectangle(x, y, 90, 50, 0x6666ff)
       .setStrokeStyle(2, 0xffffff)
       .setInteractive();
+    rect.flagIndex = idx;
 
     scene.add.text(x, y, flag.type, { font: "14px Arial", fill: "#fff" }).setOrigin(0.5);
+    rect.on("pointerdown", () => handleFlagClick(idx));
 
-    if (flag.claimedBy) {
-      const winnerColor = flag.claimedBy === socket.id ? 0xffff00 : 0xff0000;
-      rect.setStrokeStyle(4, winnerColor);
-      const bestFormation = flag.bestFormation || "";
-      scene.add.text(x, y + 30, bestFormation, { font: "12px Arial", fill: "#fff" }).setOrigin(0.5);
+    flag.rect = rect;
+
+    // Handle blinking for encampment freeze
+    if (
+      gameState.freezeForAttack &&
+      gameState.freezeForAttack.type === "encampment" &&
+      gameState.freezeForAttack.flagId === idx
+    ) {
+      startFlagBlink(scene, rect);
+    } else {
+      rect.setStrokeStyle(2, 0xffffff);
     }
 
-    rect.on("pointerdown", () => {
-      if (gameState.gameOver) return; // 🔴 prevent interaction after game ends
+    drawFlagCards(scene, flag, x, y, flagPadding, cardWidth, cardHeight, padding);
+  });
 
-      if (citadelMove && selectedCard && citadelFromFlag !== null) {
-        socket.emit("moveCard", { fromFlagId: citadelFromFlag, toFlagId: idx, card: selectedCard });
-        citadelMove = false;
-        selectedCard = null;
-        selectedCardRect = null;
-        selectedCardGlow.setVisible(false);
-        citadelFromFlag = null;
-      } else if (!gameState.attackMode && selectedCard) {
-        socket.emit("placeCard", { card: selectedCard, flagId: idx });
-      } else if (gameState.attackMode === socket.id) {
-        const opponentId = Object.keys(flag.cards).find(id => id !== socket.id);
-        if (!opponentId) return;
-        const opponentCards = flag.cards[opponentId] || [];
-        if (opponentCards.length > 0) {
-          socket.emit("destroyCard", { flagId: idx, card: opponentCards[0] });
-        }
+  drawCannon(scene);
+  drawHand(scene);
+  drawDeck(scene);
+  drawScores(scene);
+
+  // Glow for selected card
+  if (citadelMove && selectedCard && selectedCardRect) {
+    selectedCardGlow.setPosition(selectedCardRect.x, selectedCardRect.y).setVisible(true);
+  } else {
+    selectedCardGlow.setVisible(false);
+  }
+}
+
+// --- Flag Blinking Tween ---
+function startFlagBlink(scene, rect) {
+  if (flagBlinkTweens.has(rect)) return;
+
+  const blink = scene.tweens.addCounter({
+    from: 0,
+    to: 1,
+    duration: 600,
+    yoyo: true,
+    repeat: -1,
+    onUpdate: tween => {
+      const v = Math.round(tween.getValue() * 255);
+      const color = Phaser.Display.Color.Interpolate.ColorWithColor(
+        { r: 255, g: 255, b: 255 },
+        { r: 77, g: 77, b: 255 },
+        255,
+        v
+      );
+      try { rect.setStrokeStyle(4, Phaser.Display.Color.GetColor(color.r, color.g, color.b)); } catch {}
+    }
+  });
+
+  flagBlinkTweens.set(rect, blink);
+}
+
+// --- Draw Flag Cards ---
+function drawFlagCards(scene, flag, centerX, centerY, flagPadding, cardWidth, cardHeight, padding) {
+  flag.cardRects = [];
+
+  Object.entries(flag.cards).forEach(([playerId, cards]) => {
+    const isHuman = playerId === socket.id;
+    const direction = isHuman ? 1 : -1;
+    const baseY = isHuman ? centerY + flagPadding + cardHeight / 2 : centerY - flagPadding - cardHeight / 2;
+
+    cards.forEach((card, cIdx) => {
+      const cardY = baseY + direction * cIdx * (cardHeight + padding);
+      const container = scene.add.container(centerX, cardY);
+
+      const rect = scene.add.rectangle(0, 0, cardWidth, cardHeight, getCardColor(card.color))
+        .setStrokeStyle(2, 0x000000)
+        .setData("card", card);
+
+      const text = scene.add.text(0, 0, card.rank, { font: "14px Arial", fill: "#000000" })
+        .setOrigin(0.5);
+
+      container.add([rect, text]);
+      container.setSize(cardWidth, cardHeight);
+      container.setInteractive();
+
+      // Selected card glow
+      if (selectedCard && selectedCard.rank === card.rank && selectedCard.color === card.color && selectedCard.owner === card.owner) {
+        selectedCardRect = container;
+        selectedCardGlow.setPosition(container.x, container.y).setVisible(true);
       }
-    });
 
-    Object.entries(flag.cards).forEach(([playerId, cards]) => {
-      if (!Array.isArray(cards)) return;
-      const isHuman = playerId === socket.id;
-      const direction = isHuman ? 1 : -1;
-      const baseY = isHuman ? y + flagPadding + cardHeight / 2 : y - flagPadding - cardHeight / 2;
-
-      cards.forEach((card, cIdx) => {
-        const cardY = baseY + direction * cIdx * (cardHeight + padding);
-        const color = getCardColor(card.color);
-
-        const cardRect = scene.add.rectangle(x, cardY, cardWidth, cardHeight, color)
-          .setStrokeStyle(2, 0x000000)
-          .setData("card", card)
-          .setInteractive();
-
-        scene.add.text(x, cardY, card.rank, { font: "14px Arial", fill: "#000" }).setOrigin(0.5);
-
-        // Citadel effect: select a card to move
-        if (gameState.citadelActive === socket.id && playerId === socket.id) {
-          cardRect.setStrokeStyle(3, 0xffff00);
-          cardRect.on("pointerdown", () => {
-            if (gameState.gameOver) return; // 🔴 added safeguard
-            selectedCard = card;
-            citadelMove = true;
-            citadelFromFlag = idx;
-            selectedCardGlow.setPosition(cardRect.x, cardRect.y).setVisible(true);
+      // Attack highlight
+      if (gameState.attackMode === socket.id && !isHuman) {
+        rect.setStrokeStyle(4, 0xff0000);
+        container.on("pointerdown", () => {
+          if (!gameState.freezeForAttack) return;
+          socket.emit("destroyCard", { 
+            roomId, 
+            flagId: flag.rect?.flagIndex ?? null, 
+            card: { ...card, owner: playerId } 
           });
-        }
+        });
+      }
 
-        if (gameState.attackMode === socket.id && !isHuman) {
-          cardRect.setStrokeStyle(4, 0xff0000);
-          cardRect.on("pointerdown", () => {
-            if (gameState.gameOver) return; // 🔴 added safeguard
-            socket.emit("destroyCard", { flagId: idx, card });
-          });
-        }
-      });
+      // --- Citadel move ---
+      if (gameState.citadelActive === socket.id && isHuman && card.owner === socket.id) {
+        // Highlight the card
+        rect.setStrokeStyle(3, 0xffff00);
+        container.setInteractive();
+
+        // Remove previous listeners to prevent duplicates
+        container.removeAllListeners();
+
+        container.on("pointerdown", () => {
+          // Move the card to the player's hand
+          selectedCard = card;
+          selectedCardRect = container;
+          selectedCardGlow.setPosition(container.x, container.y).setVisible(true);
+
+          socket.emit("pickCardCitadel", { roomId, card });
+
+          // Reset citadel selection
+          gameState.citadelActive = null;
+          citadelMove = false;
+          selectedCard = null;
+          selectedCardRect = null;
+          selectedCardGlow.setVisible(false);
+        });
+      }
+
+      // Track container for cleanup
+      flag.cardRects.push(container);
     });
   });
 }
 
 
-function drawCannon(scene) {
-  if (!gameState || !gameState.cannon) return;
-  const cardWidth = 40, cardHeight = 60, padding = 8;
-  const CANNON_CARD_LIMIT = 2;
 
-  const humanCannonX = scene.cameras.main.width - 100;
-  const humanCannonY = scene.cameras.main.height - 180;
-  const humanCannonReady = isCannonReady(socket.id);
 
-  scene.add.rectangle(humanCannonX, humanCannonY, 80, 100, 0xff0000)
-    .setStrokeStyle(humanCannonReady ? 4 : 2, humanCannonReady ? 0xffff00 : 0xffffff)
-    .setInteractive()
-    .on("pointerdown", () => {
-      if (!selectedCard || gameState.attackMode || humanCannonReady) return;
-      const playerCards = gameState.cannon[socket.id] || [];
-      if (playerCards.length < CANNON_CARD_LIMIT) {
-        socket.emit("placeCard", { card: selectedCard, flagId: "cannon" });
-      }
+
+// --- Flag Click Handler ---
+function handleFlagClick(idx) {
+  if (gameState.gameOver) return;
+  const flag = gameState.board[idx];
+
+  // --- Citadel Move ---
+  if (citadelMove && selectedCard && citadelFromFlag !== null) {
+    socket.emit("moveCard", { 
+      roomId, 
+      fromFlagId: citadelFromFlag, 
+      toFlagId: idx, 
+      card: selectedCard 
     });
+    citadelMove = false;
+    selectedCard = null;
+    selectedCardRect = null;
+    selectedCardGlow.setVisible(false);
+    citadelFromFlag = null;
+    return;
+  }
 
-  scene.add.text(humanCannonX, humanCannonY - 70, "Your Cannon", { font: "12px Arial", fill: "#fff" }).setOrigin(0.5);
-
-  (gameState.cannon[socket.id] || []).forEach((card, idx) => {
-    const cardY = humanCannonY + idx * (cardHeight + padding);
-    scene.add.rectangle(humanCannonX, cardY, cardWidth, cardHeight, getCardColor(card.color))
-      .setStrokeStyle(2, 0x000000);
-    scene.add.text(humanCannonX, cardY, card.rank, { font: "14px Arial", fill: "#000" }).setOrigin(0.5);
-  });
-
-  const aiCannonX = scene.cameras.main.width - 100;
-  const aiCannonY = 180;
-  const aiCannonCards = gameState.cannon["AI"] || [];
-  const aiCannonReady = isCannonReady("AI");
-
-  scene.add.rectangle(aiCannonX, aiCannonY, 80, 100, 0x5555ff)
-    .setStrokeStyle(aiCannonReady ? 4 : 2, aiCannonReady ? 0xffff00 : 0xffffff);
-  scene.add.text(aiCannonX, aiCannonY - 70, "AI Cannon", { font: "12px Arial", fill: "#fff" }).setOrigin(0.5);
-
-  aiCannonCards.forEach((card, idx) => {
-    const cardY = aiCannonY - idx * (cardHeight + padding);
-    scene.add.rectangle(aiCannonX, cardY, cardWidth, cardHeight, getCardColor(card.color))
-      .setStrokeStyle(2, 0x000000);
-    scene.add.text(aiCannonX, cardY, card.rank, { font: "14px Arial", fill: "#000" }).setOrigin(0.5);
-  });
+  // --- Normal placement ---
+  if (!gameState.attackMode && selectedCard) {
+    socket.emit("placeCard", { roomId, card: selectedCard, flagId: idx });
+  }
 }
 
+// --- Cannon Functions ---
 function isCannonReady(playerId) {
   const CANNON_CARD_LIMIT = 2;
   const cards = gameState.cannon[playerId] || [];
@@ -267,67 +360,150 @@ function isCannonReady(playerId) {
          !gameState.firedCannons[playerId];
 }
 
+function drawCannon(scene) {
+  if (!gameState?.cannon) return;
+  if (!window.cannonRects) window.cannonRects = {};
+  const cardWidth = 40, cardHeight = 60, padding = 8;
+
+  const yourCannonX = scene.cameras.main.width - 100;
+  const yourCannonY = scene.cameras.main.height - 180;
+
+  // Clear previous cannon cards
+  Object.keys(gameState.cannon).forEach(playerId => {
+    if (window.cannonRects[playerId]) window.cannonRects[playerId].forEach(r => r.destroy());
+    window.cannonRects[playerId] = [];
+  });
+
+  const encampmentFreezeActive =
+    gameState.freezeForAttack && gameState.freezeForAttack.type === "encampment";
+
+  // --- Your Cannon ---
+  const ready = isCannonReady(socket.id);
+  const yourCannonBox = scene.add.rectangle(yourCannonX, yourCannonY, 80, 100, 0xff0000)
+    .setStrokeStyle(ready ? 4 : 2, ready ? 0xffff00 : 0xffffff)
+    .setInteractive()
+    .on("pointerdown", () => {
+      if (encampmentFreezeActive) return;
+      if (!selectedCard || gameState.attackMode || ready) return;
+      const cards = gameState.cannon[socket.id] || [];
+      if (cards.length < 2) socket.emit("placeCard", { roomId, card: selectedCard, flagId: "cannon" });
+    });
+
+  scene.add.text(yourCannonX, yourCannonY - 70, "Your Cannon", { font: "12px Arial", fill: "#fff" }).setOrigin(0.5);
+
+  (gameState.cannon[socket.id] || []).forEach((card, idx) => {
+    const cardY = yourCannonY + idx * (cardHeight + padding);
+    const rect = scene.add.rectangle(yourCannonX, cardY, cardWidth, cardHeight, getCardColor(card.color))
+      .setStrokeStyle(2, 0x000000)
+      .setData("card", card)
+      .setInteractive();
+
+    scene.add.text(yourCannonX, cardY, card.rank, { font: "14px Arial", fill: "#000000" }).setOrigin(0.5);
+
+    if (!encampmentFreezeActive) {
+      rect.on("pointerdown", () => {
+        selectedCard = card;
+        selectedCardRect = rect;
+        selectedCardGlow.setPosition(rect.x, rect.y).setVisible(true);
+      });
+    }
+
+    window.cannonRects[socket.id].push(rect);
+  });
+
+  // --- Opponent Cannon ---
+  const opponentId = Object.keys(gameState.cannon).find(id => id !== socket.id);
+  if (!opponentId) return;
+
+  const oppCannonX = scene.cameras.main.width - 100;
+  const oppCannonY = 180;
+  const oppReady = isCannonReady(opponentId);
+
+  scene.add.rectangle(oppCannonX, oppCannonY, 80, 100, 0x5555ff)
+    .setStrokeStyle(oppReady ? 4 : 2, oppReady ? 0xffff00 : 0xffffff);
+  scene.add.text(oppCannonX, oppCannonY - 70, "Opponent Cannon", { font: "12px Arial", fill: "#fff" }).setOrigin(0.5);
+
+  (gameState.cannon[opponentId] || []).forEach((card, idx) => {
+    const cardY = oppCannonY - idx * (cardHeight + padding);
+    const rect = scene.add.rectangle(oppCannonX, cardY, cardWidth, cardHeight, getCardColor(card.color))
+      .setStrokeStyle(2, 0x000000);
+
+    scene.add.text(oppCannonX, cardY, card.rank, { font: "14px Arial", fill: "#000000" }).setOrigin(0.5);
+
+    if (!window.cannonRects[opponentId]) window.cannonRects[opponentId] = [];
+    window.cannonRects[opponentId].push(rect);
+  });
+}
+
+
+// --- Draw Hand ---
 function drawHand(scene) {
-  if (!gameState || !gameState.hands) return;
+  if (!gameState?.hands) return;
   const cardWidth = 50, cardHeight = 70, padding = 20;
   const hand = gameState.hands[socket.id] || [];
   const yHuman = scene.cameras.main.height - 70;
-  const strongholdX = scene.cameras.main.centerX;
-  const startXHuman = strongholdX - ((hand.length - 1) * (cardWidth + padding)) / 2;
-  const cannonReady = isCannonReady(socket.id);
+  const centerX = scene.cameras.main.centerX;
+  const startX = centerX - ((hand.length - 1) * (cardWidth + padding)) / 2;
+
+  if (window.handRects) window.handRects.forEach(r => r.destroy());
+  window.handRects = [];
 
   hand.forEach((card, idx) => {
-    const x = startXHuman + idx * (cardWidth + padding);
+    const x = startX + idx * (cardWidth + padding);
 
     const rect = scene.add.rectangle(x, yHuman, cardWidth, cardHeight, getCardColor(card.color))
       .setStrokeStyle(2, 0x000000)
-      .setInteractive()
-      .setData("card", card);
+      .setData("card", card)
+      .setInteractive();
 
-    scene.add.text(x, yHuman, card.rank, { font: "16px Arial", fill: "#000" }).setOrigin(0.5);
+    scene.add.text(x, yHuman, card.rank, { font: "16px Arial", fill: "#000000" }).setOrigin(0.5);
 
     rect.on("pointerdown", () => {
-      if (cannonReady || gameState.attackMode) return;
+      if (gameState.attackMode === socket.id) return;
+
       if (selectedCardRect === rect) {
         selectedCard = null;
         selectedCardRect = null;
         selectedCardGlow.setVisible(false);
         return;
       }
+
       selectedCard = card;
       selectedCardRect = rect;
       selectedCardGlow.setPosition(rect.x, rect.y).setVisible(true);
     });
+
+    if (selectedCard && selectedCard.rank === card.rank && selectedCard.color === card.color) {
+      selectedCardRect = rect;
+      selectedCardGlow.setPosition(rect.x, rect.y).setVisible(true);
+    }
+
+    window.handRects.push(rect);
   });
 
-  if (selectedCard && selectedCardRect) {
-    selectedCardGlow.setPosition(selectedCardRect.x, selectedCardRect.y).setVisible(true);
-  }
-
+  // AI hand display
   const aiHand = gameState.hands["AI"] || [];
   const yAI = 70;
-  const startXAI = strongholdX - ((aiHand.length - 1) * (cardWidth + padding)) / 2;
+  const startXAI = centerX - ((aiHand.length - 1) * (cardWidth + padding)) / 2;
   aiHand.forEach((_, idx) => {
     const x = startXAI + idx * (cardWidth + padding);
     scene.add.rectangle(x, yAI, cardWidth, cardHeight, 0x999999).setStrokeStyle(2, 0x000000);
   });
 }
 
+// --- Deck & Scores ---
 function drawDeck(scene) {
-  if (!gameState || !gameState.deck) return;
+  if (!gameState?.deck) return;
   const deckX = 50, deckY = 350;
   const cardWidth = 40, cardHeight = 60;
-  const deckSize = gameState.deck.length;
 
-  scene.add.rectangle(deckX, deckY, cardWidth, cardHeight, 0x444444)
-    .setStrokeStyle(2, 0xffffff);
-  scene.add.text(deckX, deckY, deckSize, { font: "16px Arial", fill: "#fff" }).setOrigin(0.5);
+  scene.add.rectangle(deckX, deckY, cardWidth, cardHeight, 0x444444).setStrokeStyle(2, 0xffffff);
+  scene.add.text(deckX, deckY, gameState.deck.length, { font: "16px Arial", fill: "#fff" }).setOrigin(0.5);
 }
 
 function drawScores(scene) {
-  const padding = 20;
+  if (!gameState?.scores) return;
   let i = 0;
-  if (!gameState.scores) return;
   for (let playerId in gameState.scores) {
     const score = gameState.scores[playerId];
     scene.add.text(50, 50 + i * 20, `${playerId}: ${score} flags`, { font: "16px Arial", fill: "#fff" });
@@ -335,51 +511,48 @@ function drawScores(scene) {
   }
 }
 
-socket.on("gameOver", ({ finalWinner, scores }) => {
-    const scene = window.scene;
-    if (!scene) return;
+// --- Game Over ---
+function handleGameOver({ finalWinner, scores }) {
+  const scene = window.scene;
+  if (!scene) return;
+  gameState.gameOver = true;
 
-    const centerX = scene.cameras.main.centerX;
-    const centerY = scene.cameras.main.centerY;
+  const centerX = scene.cameras.main.centerX;
+  const centerY = scene.cameras.main.centerY;
 
-    // Destroy old UI if it exists
-    if (gameOverText) gameOverText.destroy();
-    if (scene.gameOverBox) scene.gameOverBox.destroy();
+  if (gameOverText) gameOverText.destroy();
+  if (scene.gameOverBox) scene.gameOverBox.destroy();
 
-    // --- Background box ---
-    const boxWidth = 420;
-    const boxHeight = 300;
-    const box = scene.add.rectangle(centerX, centerY, boxWidth, boxHeight, 0x000000, 0.85)
-        .setStrokeStyle(4, 0xffff00)
-        .setOrigin(0.5);
-    scene.gameOverBox = box;
+  const box = scene.add.rectangle(centerX, centerY, 420, 300, 0x000000, 0.85).setStrokeStyle(4, 0xffff00).setOrigin(0.5);
+  scene.gameOverBox = box;
 
-    // --- Title ---
-    const title = finalWinner === "Tie" ? "Tie Game!" : `${finalWinner} Wins!`;
-    scene.add.text(centerX, centerY - 100, title, { font: "40px Arial", fill: "#ffff00" }).setOrigin(0.5);
+  const title = finalWinner === "Tie" ? "Tie Game!" : `${finalWinner} Wins!`;
+  scene.add.text(centerX, centerY - 100, title, { font: "40px Arial", fill: "#ffff00" }).setOrigin(0.5);
 
-    // --- Score details ---
-    let offsetY = -40;
-    Object.entries(scores).forEach(([pid, score]) => {
-        scene.add.text(centerX, centerY + offsetY, `${pid}: ${score} flags`, { font: "24px Arial", fill: "#ffffff" }).setOrigin(0.5);
-        offsetY += 40;
-    });
+  let offsetY = -40;
+  Object.entries(scores).forEach(([pid, score]) => {
+    scene.add.text(centerX, centerY + offsetY, `${pid}: ${score} flags`, { font: "24px Arial", fill: "#ffffff" }).setOrigin(0.5);
+    offsetY += 40;
+  });
 
-    // --- Play Again button ---
-    const buttonWidth = 180;
-    const buttonHeight = 50;
+  const button = scene.add.rectangle(centerX, centerY + 100, 180, 50, 0x4444ff)
+    .setStrokeStyle(3, 0xffffff)
+    .setInteractive()
+    .on("pointerdown", () => socket?.emit("restartMatch", { roomId }));
 
-    const button = scene.add.rectangle(centerX, centerY + 100, buttonWidth, buttonHeight, 0x4444ff)
-        .setStrokeStyle(3, 0xffffff)
-        .setInteractive()
-        .on("pointerdown", () => {
-            socket.emit("restartGame");
-        });
+  scene.add.text(centerX, centerY + 100, "Play Again", { font: "20px Arial", fill: "#fff" }).setOrigin(0.5);
+}
 
-    scene.add.text(centerX, centerY + 100, "Play Again", { font: "20px Arial", fill: "#fff" }).setOrigin(0.5);
-
-    // Freeze interaction with board after game over
-    gameState.gameOver = true;
-});
-
-
+// --- Utility ---
+function getCardColor(color) {
+  const colors = {
+    Red: 0xff4d4d,
+    Blue: 0x4d4dff,
+    Green: 0x4dff4d,
+    Yellow: 0xffff4d,
+    Purple: 0xb84dff,
+    Orange: 0xffa500,
+    Pink: 0xffc0cb
+  };
+  return colors[color] || 0xffffff;
+}

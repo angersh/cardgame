@@ -1,22 +1,97 @@
+<!-- public/index.html -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Card Battle Game</title>
-
-<!-- Phaser library -->
-<script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
-
-<!-- Socket.IO client (global `io`) -->
-<script src="/socket.io/socket.io.js"></script>
-
-<!-- Your game code -->
-<script type="module" src="game.js"></script>
-
-<style>
-  body { margin: 0; background: #222; }
-  canvas { display: block; margin: auto; }
-</style>
+  <meta charset="UTF-8">
+  <title>Flag Game</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin: 0; padding: 0; background: #222; color: #fff; }
+    button { padding: 10px 20px; margin: 10px; cursor: pointer; }
+    #game-container, #playAgainBtn, #lobby { display: none; }
+    #waiting { font-size: 1.2em; margin-top: 10px; }
+    #players { margin-top: 10px; font-size: 1.1em; }
+    #game-canvas-container { margin: 20px auto; }
+  </style>
 </head>
-<body></body>
+<body>
+
+  <!-- --- Start Screen --- -->
+  <div id="start-screen">
+    <h1>Flag Game</h1>
+    <button id="play-multiplayer">Play Multiplayer</button>
+  </div>
+
+  <!-- --- Lobby Screen --- -->
+  <div id="lobby">
+    <h2>Lobby</h2>
+    <p id="waiting">Waiting for opponent...</p>
+    <div id="players"></div>
+    <button id="leaveQueueBtn">Leave Queue</button>
+  </div>
+
+  <!-- --- Game Container --- -->
+  <div id="game-container">
+    <div id="game-canvas-container"></div>
+    <button id="playAgainBtn">Play Again</button>
+  </div>
+
+  <script type="module">
+    import { startGame, setSocket } from './game.js';
+
+    const startScreen = document.getElementById('start-screen');
+    const lobbyScreen = document.getElementById('lobby');
+    const gameContainer = document.getElementById('game-container');
+    const waitingText = document.getElementById('waiting');
+    const playersDiv = document.getElementById('players');
+    const playAgainBtn = document.getElementById('playAgainBtn');
+    const leaveQueueBtn = document.getElementById('leaveQueueBtn');
+
+    let socket = null;
+    let currentRoom = null;
+
+    document.getElementById('play-multiplayer').onclick = () => {
+      startScreen.style.display = 'none';
+      lobbyScreen.style.display = 'block';
+      waitingText.style.display = 'block';
+
+      socket = io();
+      setSocket(socket);
+      socket.emit('joinQueue');
+
+      socket.on('startGame', ({ state, room }) => {
+        currentRoom = room;
+        lobbyScreen.style.display = 'none';
+        gameContainer.style.display = 'block';
+
+        const meId = socket.id;
+        const opponentId = Object.keys(state.hands).find(id => id !== meId);
+        playersDiv.innerHTML = `You: ${meId}<br>Opponent: ${opponentId}`;
+
+        startGame(true, state, room); // pass state and room to game.js
+      });
+
+      socket.on('opponentDisconnected', () => {
+        alert('Opponent disconnected!');
+      });
+
+      socket.on('gameOver', ({ finalWinner, scores }) => {
+        alert(`Game Over! Winner: ${finalWinner}`);
+      });
+    };
+
+    // --- Leave Queue ---
+    leaveQueueBtn.onclick = () => {
+      socket?.emit('leaveQueue');
+      waitingText.style.display = 'none';
+      playersDiv.innerHTML = "";
+    };
+
+    // --- Play Again ---
+    playAgainBtn.onclick = () => {
+      socket?.emit('restartMatch', { roomId: currentRoom });
+    };
+  </script>
+</body>
 </html>

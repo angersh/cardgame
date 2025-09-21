@@ -1,32 +1,32 @@
-// public/gameLogic/Card.js
-export const COLORS = ['Red', 'Blue', 'Green', 'Yellow', 'Purple', 'Orange', 'Pink'];
-export const RANKS = [1,2,3,4,5,6,7,8,9,10];
+export const COLORS = ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Pink"];
+export const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
 
 export class Card {
-  constructor(type, color=null, rank=null) {
-    this.type = type; // 'Formation' or 'Cannon'
-    this.color = color; 
+  constructor(color, rank) {
+    this.color = color;
     this.rank = rank;
   }
 }
 
 export class Flag {
-  constructor(type, maxCards, flagsWorth) {
-    this.type = type;
-    this.maxCards = maxCards;
-    this.flagsWorth = flagsWorth;
-    this.cards = {}; // per-player mapping now
-    this.claimedBy = null;
-  }
+  constructor(type, maxCards = 3, minCards = 1) {
+    this.type = type;            // e.g., "Outpost", "Encampment", etc.
+    this.maxCards = maxCards;    // how many cards allowed
+    this.minCards = minCards;    // minimum cards required to contest
+    this.cards = {};             // { playerId: [Card, Card, ...] }
+    this.claimedBy = null;       // playerId if claimed
+    this.bestFormation = "";     // string description of formation
 
-  addCard(playerId, card) {
-    if (!this.cards[playerId]) this.cards[playerId] = [];
-    if (this.cards[playerId].length >= this.maxCards) return false;
-    this.cards[playerId].push(card);
-    return true;
-  }
+    // Special triggers
+    this.chargeTriggered = false;      // For Encampment
+    this.chargeOwner = null;
 
-  isFull(playerId) {
-    return this.cards[playerId] && this.cards[playerId].length >= this.maxCards;
+    this.handBoostTriggered = false;   // For Garrison
+
+    this.strongholdTriggered = false;  // For Stronghold
+
+    this.citadelTriggered = false;     // For Citadel
   }
 }
+
+
